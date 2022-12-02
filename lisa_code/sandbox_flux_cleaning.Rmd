@@ -1,0 +1,642 @@
+---
+title: "Sandbox for US-RRC Flux Cleaning"
+author: "Lisa Haber"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## What is this?
+
+Code borrowed/adapted from Dr. Sara Knox for secondary flux data cleaning (following processing of high frequency data in EddyPro). Original code can be found [here](https://github.com/sknox01/Manitoba_Flux_Processing/blob/main/Young%20Processing/2.L2_filteringYoung.Rmd).
+
+```{r, echo=FALSE, results=FALSE}
+# Load dependencies.
+library(plotly)
+library(readxl)
+library(REddyProc)
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(gtools)
+library(ggplot2)
+library(DescTools)
+```
+
+```{r}
+
+## This was my first pass at loading data. BUT....it didn't exactly match the Knox et al approach, and led to time stamp issues that broke the process down the line.
+
+# # Load "raw" (i.e. processed but not cleaned) data from EddyPro. (Note that this file was manually compiled from multiple months of processed data from EddyPro. Customizable variables at end of full output files were not appended because of mismatch across different months of processed data.)
+# input<-read.csv("C:/github/MLABcode/data/timeseries_fluxes_usrrc_2022partial.csv", header = TRUE)
+# input <- input %>%
+#   mutate(DATE = paste(date, time, sep=' '))
+# 
+# input$DATE<-as.POSIXct(input$DATE,format= "%m/%d/%Y %H:%M", tz = "UTC")
+# 
+# # Define new data frame
+# Data_QAQC<-input
+# ls(Data_QAQC) # list variables
+```
+```{r eval=FALSE, include=FALSE}
+
+## This code works but does not need to be rerun until reprocessing with more data. 
+
+## This code comes from https://github.com/sknox01/Manitoba_Flux_Processing/blob/main/Young%20Processing/1.compiling_EddyPro_output.R
+
+#CODE:
+#############################################################################################
+####
+# 1. Reading all the files
+###
+# clear memory
+
+rm(list=ls())
+
+## NOTE: Raw EddyPro output for 8/30/2022 to 9/27/2022 had a timestamp mismatch issue resulting from how data were logged in this interval and/or how EddyPro processed them. For some reason, the EddyPro output for this month computed half-hourly intervals from XX:54 to XX:24, rather than XX:00 to XX:30. This breaks the code when generating gapfilled data for fluxes. So, I manually adjusted the times (not dates or DOY columns) in the "full_output" and "biomet" files for this month (it was easiest thing to do under time crunch). I saved them as "_ManualAdjust.csv" versions. This will be something to come up with better long term solution for later. I added 6 minutes to each time stamp using formula "=XX + 6/1440". 
+
+# set path
+#path <- "./Flux-tower/EP_outputs"
+# path <- "/Users/marionnyberg/Google\ Drive/Micromet\ Lab/Projects/2019-Burns\ Bog\ 2/Flux-tower/EP_outputs"
+path <- "C:/github/MLABcode/data/"
+
+
+
+# List only full_output files
+raw.files <- list.files(path = path, pattern = "full_output")
+raw.data <- data.frame()
+
+for(i in 1:length(raw.files)) {
+	# Get header names
+	names_temp <- names(read.csv(paste(path,"/",raw.files[i],sep=""),skip=1,sep=",",header=TRUE,dec="."))
+	
+	# Load data & apply header names
+	temp <- read.csv(paste(path,"/",raw.files[i],sep=""),skip=3,header=FALSE) #skip=3 means skip the first 3 rows of the file
+	names(temp) <- names_temp
+	
+	# Append to file
+	raw.data <- smartbind(raw.data,temp, fill = "NA")
+}
+
+####
+# 2. Creating a Timestamp with date and time variable to order the data by date-time
+###
+raw.data$Timestamp<-as.POSIXct(paste(raw.data$date, raw.data$time), format="%Y/%m/%d %H:%M:%S", tz = "Etc/GMT+5")
+
+data.ordered<-raw.data[order(raw.data$Timestamp, decreasing = FALSE ),]
+
+data.ordered[1,1:5]
+data.ordered[nrow(data.ordered),1:5]
+
+####
+#3. GAPFILLING ROWS BY GENERATING A NEW FILE  (Adapted from my "Gapfilling incomplete Time series" script)
+#####
+
+ts<-data.ordered
+
+#to estimate necessary parameters to generate the new empty dataframe with complete rows 
+begining<-as.numeric(ts$Timestamp[1])                           #to find the number that is represented by the first data of our time series
+as.POSIXct(begining,origin="1970-01-01 00:00:00",tz="Etc/GMT+5") #to confirm that the begining is the right one
+ts$Timestamp[1]
+
+ts[ts$filename %like% "not_enough_data", ]
+##now, I have a bunch of rows at the end of the ordered data frame that have no date value and seem to be breaking the subsequent code. Will toss these so I can proceed.
+# ts <- ts %>%
+#   filter(DOY >= 1)
+
+Ystart<-as.integer(as.character(ts[1,ncol(ts)], "%Y"))
+Yend<-as.integer(as.character(ts[nrow(ts),ncol(ts)], "%Y"))
+Dstart<-as.POSIXlt(ts[1,ncol(ts)])$yday+1
+Dend<-as.POSIXlt(ts[nrow(ts),ncol(ts)])$yday+1
+
+Ystart
+Yend
+Dstart
+Dend
+
+Ndays <- as.numeric((difftime(ts$Timestamp[nrow(ts)],ts$Timestamp[1], "Etc/GMT+5",
+															units = c("days"))), units="days")
+Ndays
+
+#To generate a serie of all minutes in a day:
+Tsteps<-begining+seq(from=0,to=((Ndays)*(60*60*24)),by=(30*60)) # half an hours data from the begining date to Ndays +1 (that way I assure all measured data are included in the new file)
+DATE<-as.POSIXct(Tsteps,origin="1970-01-01 00:00:00",tz="Etc/GMT+5")
+
+# Make sure time series is continuoue
+plot(diff(DATE))
+
+#Confirming length of the new Time string 
+#(THE NEW FILE SHOULD END SAME TIME THE TIME SERIES START AND ONE DAY AFTER THE MEASUREMENTS TIME SERIE)
+DATE[1]
+DATE[length(DATE)]
+ts$Timestamp[1]
+ts$Timestamp[length(ts$Timestamp)]
+
+#GENERATING A NEW DATA FRAME WITH CONTINUOUS TIME STEPS and data from THE ORIGINAL ONE
+cont.DS<-as.data.frame(DATE)
+cont.DS[,c("DATE",names(ts)[1:(length(names(ts)))-1])]<-NA
+cont.DS$DATE<-DATE
+
+#FILLING THE NEW DATAFRAME WITH DATA FROM THE ORIGINAL DATA FRAME 
+for(i in 2:ncol(cont.DS)){  
+	cont.DS[,i]<-ts[pmatch(cont.DS$DATE,ts$Timestamp),i-1]  
+	#pmatch look for the observation rows when time columns of both (old and new) dataframes match
+} 
+
+####
+# 4. Adding local time
+###
+library(lubridate)
+library(zoo)
+
+date_loca <- ymd_hms(cont.DS$DATE, tz="America/New_York")
+date_local<-as.POSIXlt(date_loca,tz="America/New_York")
+
+for (i in 1:nrow(cont.DS)){
+	cont.DS$Year_local[i]<-as.integer(as.character(date_local[i],"%Y"))
+	cont.DS$jday_local[i]<-as.POSIXlt(date_local[i])$yday+1
+	cont.DS$month_local[i]<-as.numeric(format(date_local[i],"%m"))
+	cont.DS$hour_local[i]<-as.integer(as.character(date_local[i],"%H"))
+	cont.DS$min_local[i]<-sprintf("%02s",as.integer(as.character(date_local[i],"%M")))  #sprintf function converts 0 in 00 to be pasted with hour to generate local time
+	cont.DS$time_local[i]<-paste(cont.DS$hour_local[i],cont.DS$min_local[i],sep=":")
+	day_portion<-ifelse(cont.DS$min_local[i]=="00",as.numeric(cont.DS$hour_local[i]),as.numeric(cont.DS$hour_local[i])+0.5)
+	cont.DS$DOY_local[i]<-cont.DS$jday_local[i]+(day_portion*2*0.02)
+}
+
+
+####
+# 5. Replacing -9999 by NA
+###
+cont.DS[cont.DS == -9999] <- NA
+
+## Plot key variables
+plot_ly(data = cont.DS, x = ~DATE, y = ~LE, name = 'LE', type = 'scatter', mode = 'lines') %>%
+	add_trace(y = ~H, name = 'H', mode = 'lines') %>% 
+  toWebGL()
+
+plot_ly(data = cont.DS, x = ~DATE, y = ~ch4_flux, name = 'CH4', type = 'scatter', mode = 'lines') %>% 
+  toWebGL()
+plot_ly(data = cont.DS, x = ~DATE, y = ~co2_flux, name = 'CO2', type = 'scatter', mode = 'lines') %>% 
+  toWebGL()
+
+####
+# 5. Saving the data
+###
+
+cont.DS$date <- as.Date(cont.DS$DATE) #already got this one from the answers above
+
+cont.DS$time <- format(as.POSIXct(cont.DS$DATE) ,format = "%H:%M") 
+
+
+# write.csv(cont.DS,paste('C:/github/MLABcode/data/L1_flux_data_for_cleaning','.csv',sep =''),row.names=FALSE)
+
+```
+
+## Filtering variables
+
+Apply some maximum and minimum values for data screening. Most of these have been determined empirically based on very limited data available at US-RRC in 2022. Note that all will need to be revisited and perhaps altered prior to "official" analysis for publication.
+
+```{r}
+
+# set wd
+getwd()
+dir <- "C:/github/MLABcode/"
+knitr::opts_knit$set(root.dir = dir)
+
+#Load data made in previous step
+input<-read.csv(paste('C:/github/MLABcode/data/L1_flux_data_for_cleaning.csv',sep=''))
+input$DATE<-as.POSIXct(input$DATE,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+# Define new data frame
+Data_QAQC<-input
+
+# pitch_max <- 7 #[deg] ## hmmmm....ask about this, our range is huge. -62.08 to 77.27
+# pitch_min <- -7 #[deg]
+# WD -> ADD LATER!
+qc_flag <- 1 #[#] 
+w.ts_cov_max <- 0.5 #[m+1K+1s-1] ## our range is -0.196 to 0.247 ## CHECK for final
+# ts_var_max <- 3 #[K+2] ## our range is 0.00219 to 13.324 ## CHECK for final
+# mean_value_RSSI_LI.7200_min <- 50 ## ALL our values are -9999, we have no 7200 installed
+mean_value_LI.7500_min <- 50 ## our range is 13 to 100 ## CHECK for final
+h2o_flux_min <- -15 #[mmol+1s-1m-2] # our actual minimum is -23 or so, but -15 looks reasonable ## CHECK for final
+h2o_flux_max <- 25 #[mmol+1s-1m-2] # our max is 25.493 ## CHECK for final
+# h2o_var_max <- 9000 # our highest value is 345313, min is -9999 ## CHECK for final
+# h2o_mean_max <- 2000 #[mmol/m3]  ## CHECK for final
+# co2_mean_min <- 0 #[mmol/m3]  ## CHECK for final
+# co2_var_max <- 0.2 # our range is 0.0000773 to 72.805 in the high qual fluxes. CHECK for final
+co2_flux_max <- 100 #[µmol+1s-1m-2] ## eyeballing this! ## CHECK for final 
+co2_flux_min <- -75 #[µmol+1s-1m-2] ## eyeballing this! ## CHECK for final
+rssi_77_mean_min <- 20 #[#] this looks pretty standard, don't expect to change it later
+# ch4_mean_min <- 1.7 # [ppm] ## CHECK for final
+# ch4_var_max <- 0.0005 ## our range is -9.99e+03 to 3.76 e-03 ## CHECK for final
+ch4_flux_min <- -0.5 #[µmol+1s-1m-2] ## our range is -2 to 2, roughly. eyeballing this ## CHECK for final
+ch4_flux_max <- 1.5 #[µmol+1s-1m-2] ## CHECK for final
+ustar_max <- 1.2 # our range is 0.0056 to 0.8382 ## CHECK for final
+wind_max <- 360 #degrees ## eyeballing from map ## CHECK for final
+wind_min <- 100 #degrees ## eyeballing from map ## CHECK for final
+# L_max <- 10000 # [m] - added 13/08/21 - D. Ng ## not sure what these are ## CHECK for final
+# L_min <- -10000 # [m] - added 13/08/21 - D. Ng ## not sure what these are ## CHECK for final
+
+# Plot filtering variable of interest to check values
+plot_ly(data = Data_QAQC, x = ~DATE, y = ~co2_var, name = 'pitch', type = 'scatter', mode = 'line') %>%
+  layout(yaxis = list(range = c(-1, 1))) %>% 
+  plotly::toWebGL()
+
+```
+
+```{r Create flags (with the exception of the ustar flag)}
+Data_QAQC$badt <- ifelse(abs(input$w.ts_cov) > w.ts_cov_max | input$qc_H > qc_flag,1,0)
+Data_QAQC$badq <- ifelse(input$h2o_flux < h2o_flux_min | input$h2o_flux > h2o_flux_max | input$co2_signal_strength_7500_mean < mean_value_LI.7500_min | input$qc_LE > qc_flag,1,0)
+Data_QAQC$badc <- ifelse(input$co2_flux < co2_flux_min | input$co2_flux > co2_flux_max | input$co2_signal_strength_7500_mean < mean_value_LI.7500_min | input$qc_co2_flux > qc_flag,1,0)
+Data_QAQC$badm <- ifelse(input$ch4_flux < ch4_flux_min | input$ch4_flux > ch4_flux_max | input$rssi_77_mean < rssi_77_mean_min | input$qc_ch4_flux > qc_flag,1,0)
+Data_QAQC$badwind <- ifelse(input$wind_dir > wind_max | input$wind_dir < wind_min,1,0) 
+```
+
+```{r Filter relevant CO2 variables to run ustar filtering next, echo=FALSE, warning=FALSE}
+Data_QAQC$co2_flux[Data_QAQC$badc == 1] <- NA
+# Plot unfiltered & filtered CO2 data
+plot_ly(data = input, x = ~DATE, y = ~co2_flux, name = 'original', type = 'scatter', mode = 'markers',marker = list(size = 3)) %>%
+  add_trace(data = Data_QAQC, x = ~DATE, y = ~co2_flux, name = 'filtered', mode = 'markers') %>% 
+  toWebGL()
+# Plot only unfiltered data
+plot_ly(data = Data_QAQC, x = ~DATE, y = ~co2_flux, name = 'original', type = 'scatter', mode = 'markers',marker = list(size = 3)) %>% 
+  toWebGL()
+
+## same for methane & H2O:
+
+```
+## A little bit of preliminary visualization & counting...
+```{r eval=FALSE, include=FALSE}
+## count number of useful flux values (i.e. Foken flag 0 or 1)
+high_qual_flux <- input %>%
+  filter(qc_co2_flux == 0 | qc_co2_flux == 1) 
+
+count(high_qual_flux) #5837 of 7061 total flux values can be retained, or 82.7 %
+
+length(unique(high_qual_flux$date)) # 151 days in date set
+
+
+## count values with quality flag of 2 or value of -9999 (based on Mauder & Foken system)
+low_qual_flux <- input %>%
+  filter(qc_co2_flux == 2 | qc_co2_flux == -9999) %>%
+  summarize(n = n())
+
+low_qual_flux # 1224 of 7061 total flux values need to be discarded
+
+## count questionable but not terrible fluxes, Foken flag = 1
+intermed_qual_flux <- input %>%
+  filter(qc_co2_flux == 1) %>%
+  summarize(n = n())
+
+intermed_qual_flux
+
+
+# visualize CO2 flux with DOY as the x variable (i.e. time)
+
+plot1 <- high_qual_flux %>%
+  filter(co2_flux != -9999) %>%
+  ggplot(aes(x = DOY, y = co2_flux)) + 
+  geom_point()
+
+plot1
+
+plot2 <- input %>%
+  filter(co2_flux != -9999, 
+         co2_flux < 10,
+         co2_flux > -10) %>%
+  ggplot(aes(x = DOY, y = co2_flux)) + 
+  geom_point()
+
+plot2
+
+# now methane flux
+plotm1 <- input %>%
+  filter(ch4_flux != -9999) %>%
+  ggplot(aes(x = DOY, y = ch4_flux)) + 
+  geom_point()
+
+plotm1
+
+# h20 flux
+ploth1 <- input %>%
+  filter(h2o_flux != -9999) %>%
+  ggplot(aes(x = DOY, y = h2o_flux)) + 
+  geom_point()
+
+ploth1
+
+ploth2 <- input %>%
+  filter(h2o_flux != -9999, 
+         h2o_flux < 15,
+         h2o_flux > -5) %>%
+  ggplot(aes(x = DOY, y = h2o_flux)) + 
+  geom_point()
+
+ploth2
+```
+
+```{r, eval=FALSE, echo=FALSE, include = FALSE}
+
+### histogram for wind direction
+# if only a small subset of data points are coming from problematic areas to northeast/east of tower, then....that's good news
+as.numeric(high_qual_flux$wind_dir)
+hist(high_qual_flux$wind_dir)
+```
+
+
+```{r Prepare data for ustar filtering using REddyProc, echo=FALSE, include=FALSE}
+
+# Loading biomet data
+
+# 07/07/2021 - Darian Ng
+# For integrated biomet outputs from Eddypro (i.e. licor): Instead of reading met_merged biomet csv, load each biomet file from EP_outputs and compile them into a dataframe. 
+# POSSIBLE ISSUE: list.files(path=path,pattern="biomet") sometimes won't recognize each biomet file as a unique list element.
+# Original: met <- read.csv(paste('./met_data/met_merged/','met_corrected_gapfilledBB2.csv',sep=""),sep=",",header=TRUE,dec=".")
+# met1 <- read.csv("C:/github/MLABcode/data/eddypro_run01_biomet_2022-10-14T125156_adv.csv", header=TRUE)
+# met3 <- read.csv("C:/github/MLABcode/data/eddypro_run02_biomet_2022-11-05T065924_adv.csv", header=TRUE)
+# met4 <- read.csv("C:/github/MLABcode/data/eddypro_usrrc_20220602_20220629_run02_biomet_2022-09-30T083110_adv.csv", header=TRUE)
+# met5 <- read.csv("C:/github/MLABcode/data/eddypro_usrrc_20220629_20220728_run01_biomet_2022-09-26T113110_adv.csv", header=TRUE)
+# met6 <- read.csv("C:/github/MLABcode/data/eddypro_usrrc_20220728_20220830_biomet_2022-08-31T104557_adv.csv", header=TRUE)
+
+met.files <- list.files(path = "C:/github/MLABcode/data/", pattern = "biomet")
+met <- data.frame()
+
+# Compiling into dataframe
+for(i in 1:length(met.files)) {
+	# Get header names
+	names_temp <- names(read.csv(paste("C:/github/MLABcode/data/",met.files[i],sep=""),skip=0,sep=",",header=TRUE,dec="."))
+	
+	# Load data & apply header names
+	temp <- read.csv(paste("C:/github/MLABcode/data/",met.files[i],sep=""),skip=2,header=FALSE) #skip=3 means skip the first 3 rows of the file
+	names(temp) <- names_temp
+	
+	# Append to file
+	met <- smartbind(met,temp, fill = "NA")
+}
+
+# Formatting met date as yyyy-mm-dd hh:mm:ss to include time and adding "Year" and "hour" columns
+for(i in 1:length(met$date)) {
+  time <- met$time[i]
+  met$date[i] <- paste(met$date[i],time)
+  
+  Yr <- as.numeric(substr(met$date[i],start=1,stop=4))
+  Hr <- as.numeric(substr(met$time[i],start=1,stop=2))
+  
+  Min <- substr(met$time[i],start=4,stop=5)
+  if (Min == "30") {
+    Hr <- Hr+0.5
+  } 
+  
+  met$year[i] <- Yr
+  met$hour[i] <- Hr
+  
+}
+
+# Creating columns for new & renamed variables: net radiation, saturated vapour pressure (es), vpd. --> Missing Soil Heat Flux, so can't derive soil heat flux (G), & available energy (ae),
+met$NR <- met$RN_1_1_1
+
+# Converting air and soil temp to Celsius
+met$TA_1_1_1 <- met$TA_1_1_1 - 273.15
+met$TS_1_1_1 <- met$TS_1_1_1 - 273.15
+met$TS_2_1_1 <- met$TS_2_1_1 - 273.15
+met$TS_3_1_1 <- met$TS_3_1_1 - 273.15
+
+met$es <- 0.611*exp(17.502*met$TA_1_1_1/(met$TA_1_1_1+240.97))
+met$VPD <- met$es*(1-(met$RH_1_1_1/100))
+
+
+met$Timestamp<-as.POSIXct(paste(met$date, met$time), format="%Y/%m/%d %H:%M:%S", tz = "Etc/GMT+5")
+
+###
+# GAPFILLING: Checking for gaps in half-hourly data, then filling with NA in a new dataframe.
+###
+
+# Ordering data by date/time
+data.ordered<-met[order(met$Timestamp, decreasing = FALSE ),]
+
+data.ordered[1,1:5]
+data.ordered[nrow(data.ordered),1:5]
+
+# Generating new dataframe and gapfilling with NA
+
+ts<-data.ordered
+##now, I have a bunch of rows at the end of the ordered data frame that have no date value and seem to be breaking the subsequent code. Will toss these so I can proceed.
+# ts <- ts %>%
+#   filter(DOY >= 1)
+
+#to estimate necessary parameters to generate the new empty dataframe with complete rows 
+beginning<-as.numeric(ts$Timestamp[1])      # Finding number representing the first data of our time series
+as.POSIXct(beginning,origin="1970-01-01 00:00:00",tz="Etc/GMT+5") # to confirm that the beginning is the right one
+ts$Timestamp[1]
+
+Ystart<-as.integer(as.character(ts[1,ncol(ts)], "%Y")) # Starting year
+Yend<-as.integer(as.character(ts[nrow(ts),ncol(ts)], "%Y")) # End  year
+Dstart<-as.POSIXlt(ts[1,ncol(ts)])$yday # Starting date
+Dend<-as.POSIXlt(ts[nrow(ts),ncol(ts)])$yday+1 # End date
+
+Ndays <- as.numeric((difftime(ts$Timestamp[nrow(ts)],ts$Timestamp[1], "Etc/GMT+5",
+                              units = c("days"))), units="days")
+
+Tsteps<-beginning+seq(from=0,to=((Ndays)*(60*60*24)),by=(30*60)) # 30 minute steps in seconds from the beginning date to Ndays +1 (to ensure all measured data are included in the new file)
+DATE<-as.POSIXct(Tsteps,origin="1970-01-01 00:00:00",tz="Etc/GMT+5") # Turning steps back into dates
+
+# CHECK start and end times between the two files are equal.
+DATE[1] == ts$Timestamp[1]
+DATE[length(DATE)] == ts$Timestamp[length(ts$Timestamp)]
+
+#GENERATING A NEW DATA FRAME WITH CONTINUOUS TIME STEPS and data from THE ORIGINAL ONE
+cont.DS<-as.data.frame(DATE)
+cont.DS[,c("DATE",names(ts)[1:(length(names(ts)))-1])]<-NA
+cont.DS$DATE<-DATE
+
+#FILLING THE NEW DATAFRAME WITH DATA FROM THE ORIGINAL DATA FRAME 
+for(i in 2:ncol(cont.DS)){  
+  cont.DS[,i]<-ts[pmatch(cont.DS$DATE,ts$Timestamp),i-1]  
+  #pmatch look for the observation rows when time columns of both (old and new) dataframes match
+} 
+
+# Adding local time
+
+date_loca <- ymd_hms(cont.DS$DATE, tz="America/New_York")
+date_local<-as.POSIXlt(date_loca,tz="America/New_York")
+
+for (i in 1:nrow(cont.DS)){
+  cont.DS$Year_local[i]<-as.integer(as.character(date_local[i],"%Y"))
+  cont.DS$jday_local[i]<-as.POSIXlt(date_local[i])$yday+1
+  cont.DS$month_local[i]<-as.numeric(format(date_local[i],"%m"))
+  cont.DS$hour_local[i]<-as.integer(as.character(date_local[i],"%H"))
+  cont.DS$min_local[i]<-sprintf("%02s",as.integer(as.character(date_local[i],"%M")))  #sprintf function converts 0 in 00 to be pasted with hour to generate local time
+  cont.DS$time_local[i]<-paste(cont.DS$hour_local[i],cont.DS$min_local[i],sep=":")
+  day_portion<-ifelse(cont.DS$min_local[i]=="00",as.numeric(cont.DS$hour_local[i]),as.numeric(cont.DS$hour_local[i])+0.5)
+  cont.DS$DOY_local[i]<-cont.DS$jday_local[i]+(day_portion*2*0.02)
+}
+
+# Replacing -9999 by NA
+cont.DS[cont.DS == -9999] <- NA
+
+met <- cont.DS
+
+#Match met and flux time series
+met$date <- as.POSIXct(met$date, Origin = "1970-01-01 00:00:00", tz = "UTC")
+
+# Plot met data if needed
+# Eddypro biomet variable reference list: https://www.licor.com/env/support/EddyPro/topics/biomet-data-format.html, https://www.licor.com/env/support/Biomet-System/topics/viewing-logged-data.html
+plot_ly(data = met, x = ~date, y = ~TA_1_1_1, type = 'scatter', mode = 'lines') %>% 
+  toWebGL()
+
+Data_QAQC$DATE[1]
+met$date[1]
+
+Data_QAQC$obs<-c(1:nrow(Data_QAQC))
+met$obs1 <- c(1:nrow(met)) #Testing because 'obs' column doesn't start at 1 for some reason
+
+start_date<-Data_QAQC$DATE[1]
+
+if (Data_QAQC$DATE[nrow(Data_QAQC)]>met[nrow(met),1]) { end_date<-met[nrow(met),1] 
+}else{
+  end_date<-Data_QAQC$DATE[nrow(Data_QAQC)]
+}
+
+start_date  #start of matching period
+end_date    #end of matching period
+
+F_start<-Data_QAQC[Data_QAQC$DATE==start_date,match('obs',names(Data_QAQC))] 
+F_end<-Data_QAQC[Data_QAQC$DATE==end_date,match('obs',names(Data_QAQC))]
+
+# M_start<-met[met$date==start_date,match('obs1',names(met))] #TEST
+# M_end<-met[met$date==end_date,match('obs1',names(met))] #TEST
+
+start_bool <- met$date==start_date
+end_bool <- met$date == end_date
+
+M_start<-met[which(start_bool==TRUE),match('obs1',names(met))] #TEST
+M_end<-met[which(end_bool==TRUE),match('obs1',names(met))] #TEST
+
+M_end-M_start==F_end-F_start   #If everything goes well this should be TRUE 
+
+# # Create output file to use in REddyProc for ustar filtering
+output <- cbind(met[M_start:M_end,match(c('year','DOY','hour','TA_1_1_1','RG_1_1_1'),names(met))], ## note that Knox lab uses SWIN_1_1_1, but our biomet program does not collect this
+  Data_QAQC[F_start:F_end,match(c('co2_flux','u.','wind_dir'),names(Data_QAQC))])
+
+# rounding DOY down
+output$DOY <- floor(output$DOY)
+
+
+# Reorder & rename columns
+output <- output[c("year","DOY", "hour","co2_flux","RG_1_1_1","TA_1_1_1","u.","wind_dir")]
+names_output<-c('Year','DoY','Hour','NEE','Rg','Tair','Ustar',"Wind_dir")
+names(output)<-names_output
+  
+#Adding the units row
+UNITS<-list('-','-','-','umol_m-2_s-1','Wm-2','degC','ms-1','ms-1')
+
+output <- rbind(UNITS,output)
+
+#Transforming missing values in -9999:
+output[is.na(output)]<--9999
+
+
+
+#Saving the file:
+write.table(output, file = "C:/github/MLABcode/data/for_ustar_filtering.txt", row.names=FALSE, sep='\t')
+```
+
+```{r eval=FALSE, include=FALSE}
+#Converting units for the right input file format
+met$VPD_hPa <- met$VPD*10
+# Create output file to use in REddyProc for ustar filtering - need all soil temp reps?
+output <- cbind(met[M_start:M_end,match(c('year','DOY','hour', 'PPFD_1_1_1', 'TA_1_1_1','RG_1_1_1','RH_1_1_1', 'VPD_hPa','TS_1_1_1','TS_2_1_1', 'TS_3_1_1'),names(met))], 
+               Data_QAQC[F_start:F_end,match(c('co2_flux','ch4_flux','LE','H','u.','wind_dir'),names(Data_QAQC))])
+
+# Reorder & rename columns
+#01/07/2020 - add reps for soil temp
+output <- output[c("year", "DOY", "hour","co2_flux","ch4_flux","LE","H","RG_1_1_1", "PPFD_1_1_1", "TA_1_1_1","TS_1_1_1","TS_2_1_1", 'TS_3_1_1', "RH_1_1_1","VPD_hPa","u.","wind_dir")]
+names_output<-c('Year','DoY','Hour','NEE','FCH4','LE','H','Rg', 'PPFD', 'Tair','Tsoil_rep1','Tsoil_rep2','Tsoil_rep3','rH','VPD','Ustar','Wind_dir')
+names(output)<-names_output
+#Adding the units row
+UNITS<-list('-','-','-','umol_m-2_s-1','umol_m-2_s-1','Wm-2','Wm-2','Wm-2', 'umol_m-2_s-1', 'degC','degC','degC','degC','%','hPa','ms-1','ms-1')
+output <- rbind(UNITS,output)
+#Transforming missing values in -9999:
+output[is.na(output)]<--9999
+
+#Saving the file:
+write.csv(output,file = "C:/github/MLABcode/data/fluxes_biomet_for_agu_2022.csv",row.names=FALSE)   
+
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# Load data & library
+library(REddyProc)
+EddyData.F <- fLoadTXTIntoDataframe("C:/github/MLABcode/data/for_ustar_filtering.txt")
+
+#Gapfill year and hour NA's
+na_idx = which(is.na(EddyData.F$Hour))
+
+for (idx in na_idx){
+  previous_hour = EddyData.F$Hour[idx-1]
+  previous_day = EddyData.F$DoY[idx-1]
+  previous_year = EddyData.F$Year[idx-1]
+  # Stepping into missing hour for EddyData.F and met
+  if (previous_hour != 23.5) {
+    EddyData.F$Hour[idx] <- previous_hour + 0.5
+    met$hour[idx] <- met$hour[idx-1] +0.5
+  } else{
+    EddyData.F$Hour[idx] <- 0
+    met$hour[idx] <- 0
+  }
+  # Stepping into missing day
+  if (previous_hour == 23.5 & previous_day == 365) {
+    EddyData.F$DoY[idx] <- 1
+    met$DOY[idx] <- 1
+  } else if (previous_hour == 23.5 & previous_day != 365) {
+    EddyData.F$DoY[idx] <- previous_day + 1
+    met$DOY[idx] <- met$DOY[idx-1] + 0.0208
+  } else if (previous_hour < 23.5) {
+    EddyData.F$DoY[idx] <- previous_day
+    met$DOY[idx] <- met$DOY[idx-1] + 0.0208
+  }
+  # Stepping into missing year
+  if (previous_hour == 23.5 & previous_day == 365) {
+    EddyData.F$Year[idx] <- previous_year + 1
+    met$year[idx] <- met$year[idx-1] + 1
+  } else {
+    EddyData.F$Year[idx] <- previous_year
+    met$year[idx] <- met$year[idx-1]
+  }
+}
+
+
+# Add time stamp in POSIX time format
+EddyDataWithPosix.F <- fConvertTimeToPosix(EddyData.F, 'YDH',Year.s = 'Year',Day.s = 'DoY',Hour.s = 'Hour')
+
+
+
+EddyProc.C <- sEddyProc$new('US-RRC', EddyDataWithPosix.F,
+                            c("NEE","Rg","Tair","Ustar"))
+
+
+
+# Single ustar threshold estimate
+uStarTh <- EddyProc.C$sEstUstarThold()$uStarTh
+
+# ustar threshold decision: separate for each individual year
+threshold <- uStarTh %>% filter(aggregationMode == "year")
+threshold <- threshold[, c(2,4)]
+years <- threshold[, 1]
+nyears <- length(years)
+
+Data_QAQC$ustar_thr <- rep(0, nrow(Data_QAQC))
+for (i in 1:nyears){
+  Data_QAQC$ustar_thr[year(Data_QAQC$DATE) == years[i]] <- threshold[i, 2]
+}
+```
+
+```{r Plot ustar threshold, echo=FALSE}
+# plot_ly(data = Data_QAQC, x = ~DATE, y = ~ustar_thr, type = 'scatter', mode = 'lines') %>% 
+#   toWebGL()
+```
+
